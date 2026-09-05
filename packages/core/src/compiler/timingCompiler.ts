@@ -154,6 +154,60 @@ function maskInertRegions(html: string): { masked: string; restore: (s: string) 
 
 // ── Core compilation ─────────────────────────────────────────────────────
 
+function* iterateOpeningTags(html: string, prefix: RegExp) {
+  let match: RegExpExecArray | null;
+  while ((match = prefix.exec(html)) !== null) {
+    const closing = html.indexOf(">", prefix.lastIndex);
+    // Without a closer, no later prefix can form a complete tag either.
+    if (closing < 0) break;
+    const end = closing + 1;
+    yield { tag: html.slice(match.index, end), index: match.index, end };
+    prefix.lastIndex = end;
+  }
+}
+
+function replaceOpeningTags(
+  html: string,
+  prefix: RegExp,
+  replace: (tag: string) => string,
+): string {
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const { tag, index, end } of iterateOpeningTags(html, prefix)) {
+    parts.push(html.slice(cursor, index), replace(tag));
+    cursor = end;
+  }
+  parts.push(html.slice(cursor));
+  return parts.join("");
+}
+
+function replaceIdTags(html: string, id: string, replace: (tag: string) => string): string {
+  const idPattern = new RegExp(`id=["']${escapeRegex(id)}["']`, "gi");
+  const lastClosing = html.lastIndexOf(">");
+  const parts: string[] = [];
+  let cursor = 0;
+  let candidate = idPattern.exec(html);
+  for (const { index, end } of iterateOpeningTags(html, /</g)) {
+    if (index < cursor) continue;
+    let targetEnd = -1;
+    while (candidate && candidate.index < end) {
+      const candidateEnd = candidate.index + candidate[0].length;
+      if (candidate.index > index && candidateEnd <= lastClosing) targetEnd = candidateEnd;
+      // Preserve the old greedy prefix's last matching ID, including overlaps.
+      idPattern.lastIndex = candidate.index + 1;
+      candidate = idPattern.exec(html);
+    }
+    if (targetEnd < 0) continue;
+    // An authored ID can itself contain '>', so its closer may follow the
+    // initial span. The lastClosing check guarantees a closing delimiter.
+    const closing = html.indexOf(">", targetEnd) + 1;
+    parts.push(html.slice(cursor, index), replace(html.slice(index, closing)));
+    cursor = closing;
+  }
+  parts.push(html.slice(cursor));
+  return parts.join("");
+}
+
 function compileTag(
   tag: string,
   isVideo: boolean,
@@ -228,14 +282,14 @@ export function compileTimingAttrs(html: string): CompilationResult {
   html = masked;
 
   // Process <video ...> tags
-  html = html.replace(/<video[^>]*>/gi, (match) => {
+  html = replaceOpeningTags(html, /<video/gi, (match) => {
     const { tag, unresolved: u } = compileTag(match, true, () => nextVideoId++);
     if (u) unresolved.push(u);
     return tag;
   });
 
   // Process <audio ...> tags
-  html = html.replace(/<audio[^>]*>/gi, (match) => {
+  html = replaceOpeningTags(html, /<audio/gi, (match) => {
     const { tag, unresolved: u } = compileTag(match, false, () => nextAudioId++);
     if (u) unresolved.push(u);
     return tag;
@@ -243,9 +297,9 @@ export function compileTimingAttrs(html: string): CompilationResult {
 
   // Identify unresolved timed elements (divs with data-start but no data-end/data-duration)
   // These are typically compositions whose duration depends on GSAP timelines
-  html.replace(/<(?:div|section)[^>]*>/gi, (match) => {
-    if (!hasAttr(match, "data-start")) return match;
-    if (hasAttr(match, "data-end") || hasAttr(match, "data-duration")) return match;
+  for (const { tag: match } of iterateOpeningTags(html, /<(?:div|section)/gi)) {
+    if (!hasAttr(match, "data-start")) continue;
+    if (hasAttr(match, "data-end") || hasAttr(match, "data-duration")) continue;
 
     const id = getAttr(match, "id");
     const compositionSrc = getAttr(match, "data-composition-src");
@@ -260,9 +314,7 @@ export function compileTimingAttrs(html: string): CompilationResult {
         compositionSrc: compositionSrc ?? undefined,
       });
     }
-
-    return match;
-  });
+  }
 
   return { html: restore(html), unresolved };
 }
@@ -277,9 +329,7 @@ export function compileTimingAttrs(html: string): CompilationResult {
 export function injectDurations(html: string, resolutions: ResolvedDuration[]): string {
   for (const { id, duration } of resolutions) {
     // Match the element's opening tag by id
-    const idPattern = new RegExp(`(<[^>]*id=["']${escapeRegex(id)}["'][^>]*>)`, "gi");
-
-    html = html.replace(idPattern, (tag) => {
+    html = replaceIdTags(html, id, (tag) => {
       let result = tag;
 
       // Add data-duration if missing
@@ -314,10 +364,7 @@ export function extractResolvedMedia(html: string): ResolvedMediaElement[] {
   const resolved: ResolvedMediaElement[] = [];
 
   html = maskInertRegions(html).masked;
-  const mediaRegex = /<(?:video|audio)[^>]*>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = mediaRegex.exec(html)) !== null) {
-    const tag = match[0];
+  for (const { tag } of iterateOpeningTags(html, /<(?:video|audio)/gi)) {
     const id = getAttr(tag, "id");
     const durationStr = getAttr(tag, "data-duration");
     if (!id || durationStr === null) continue;
@@ -351,9 +398,7 @@ export function extractResolvedMedia(html: string): ResolvedMediaElement[] {
  */
 export function clampDurations(html: string, clamps: ResolvedDuration[]): string {
   for (const { id, duration } of clamps) {
-    const idPattern = new RegExp(`(<[^>]*id=["']${escapeRegex(id)}["'][^>]*>)`, "gi");
-
-    html = html.replace(idPattern, (tag) => {
+    html = replaceIdTags(html, id, (tag) => {
       // Replace data-duration value
       tag = tag.replace(/data-duration=["'][^"']*["']/, `data-duration="${duration}"`);
 
