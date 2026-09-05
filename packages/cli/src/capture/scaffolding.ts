@@ -5,7 +5,7 @@
  * (index.html, meta.json, AGENTS.md, CLAUDE.md).
  */
 
-import { existsSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync, readFileSync, mkdtempSync, linkSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { CatalogedAsset } from "./assetCataloger.js";
 import type { CaptureResult, DesignTokens } from "./types.js";
@@ -71,11 +71,23 @@ export async function generateProjectScaffold(
   const metaPath = join(outputDir, "meta.json");
   if (!existsSync(metaPath)) {
     const hostname = new URL(url).hostname.replace(/^www\./, "");
-    writeFileSync(
-      metaPath,
-      JSON.stringify({ id: hostname + "-video", name: tokens.title || hostname }, null, 2),
-      "utf-8",
-    );
+    const stagingDir = mkdtempSync(join(outputDir, ".hf-meta-"));
+    try {
+      const stagedPath = join(stagingDir, "meta.json");
+      writeFileSync(
+        stagedPath,
+        JSON.stringify({ id: hostname + "-video", name: tokens.title || hostname }, null, 2),
+        { encoding: "utf-8", flag: "wx" },
+      );
+      // Linking publishes without following or replacing an existing destination entry.
+      try {
+        linkSync(stagedPath, metaPath);
+      } catch (err) {
+        if (!(err instanceof Error && "code" in err && err.code === "EEXIST")) throw err;
+      }
+    } finally {
+      rmSync(stagingDir, { recursive: true, force: true });
+    }
   }
 
   // Generate AGENTS.md + CLAUDE.md (AI agent instructions — always, regardless of API keys)
